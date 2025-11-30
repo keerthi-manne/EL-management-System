@@ -26,6 +26,23 @@ def add_theme():
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
+# ✅ ADD THIS - PUBLIC endpoint for Student Dashboard dropdown
+@themes_bp.route('/public', methods=['GET'])
+def get_public_themes():
+    """✅ PUBLIC - ALL themes for Student Dashboard dropdown"""
+    cur = mysql.connection.cursor()
+    try:
+        cur.execute("SELECT ThemeID, ThemeName FROM theme ORDER BY ThemeName")
+        rows = cur.fetchall()
+        themes = [{'ThemeID': row[0], 'ThemeName': row[1]} for row in rows]
+        print(f"✅ Public themes: {len(themes)} loaded")
+        return jsonify({'themes': themes}), 200
+    except Exception as e:
+        print(f"💥 Public themes error: {e}")
+        return jsonify({'themes': []}), 200
+    finally:
+        cur.close()
+
 
 @themes_bp.route('', methods=['GET'])
 @jwt_required()

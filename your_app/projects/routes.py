@@ -1,13 +1,13 @@
-from flask import Blueprint, request, jsonify, make_response
+from flask import Blueprint, request, jsonify, make_response, Response
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from your_app import mysql
 from your_app.auth.routes import roles_required
-from your_app.notifications.routes import send_direct_notification  # ✅ FIXED import
+from your_app.notifications.routes import send_direct_notification
 import csv
 import io
-from flask import Response
 
 projects_bp = Blueprint('projects_bp', __name__)
+
 
 @projects_bp.before_request
 def handle_preflight():
@@ -17,6 +17,7 @@ def handle_preflight():
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
         return response
+
 
 # ------------------ Create Project ------------------ #
 @projects_bp.route('/', methods=['POST'])
@@ -64,6 +65,7 @@ def create_project():
     finally:
         cur.close()
 
+
 # ------------------ Get All Projects (with filters) ------------------ #
 @projects_bp.route('/', methods=['GET'])
 @jwt_required()
@@ -103,6 +105,7 @@ def get_projects():
     } for p in projects]
     return jsonify(results), 200
 
+
 # ------------------ Get Project by ID ------------------ #
 @projects_bp.route('/<int:project_id>', methods=['GET'])
 @jwt_required()
@@ -132,6 +135,7 @@ def get_project(project_id):
         'AggregateScore': p[6],
     }
     return jsonify(result), 200
+
 
 # ------------------ Update Project ------------------ #
 @projects_bp.route('/<int:project_id>', methods=['PUT'])
@@ -181,6 +185,7 @@ def update_project(project_id):
     finally:
         cur.close()
 
+
 # ------------------ Delete Project (Admin) ------------------ #
 @projects_bp.route('/<int:project_id>', methods=['DELETE'])
 @jwt_required()
@@ -196,6 +201,7 @@ def delete_project(project_id):
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
+
 
 # ------------------ Search Projects ------------------ #
 @projects_bp.route('/search', methods=['GET'])
@@ -225,56 +231,66 @@ def search_projects():
     } for p in projects]
     return jsonify(results), 200
 
-# ✅ StudentDashboard - /projects/student
+
+# ------------------ Student projects ------------------ #
 @projects_bp.route('/student', methods=['GET'])
 @jwt_required()
 @roles_required('Student')
 def get_student_projects():
     user_id = get_jwt_identity()
+    print(f"🔍 Student {user_id} requesting projects")
+
     cur = mysql.connection.cursor()
-    
     try:
         cur.execute("""
-            SELECT p.ProjectID, p.Title, p.Abstract, p.ProblemStatement, p.ThemeID, p.Status
-            FROM Project p
-            WHERE p.ProjectID IN (
-                SELECT tm.ProjectID 
-                FROM TeamMember tm 
-                WHERE tm.UserID = %s
-            )
+            SELECT DISTINCT 
+                p.ProjectID, 
+                COALESCE(p.Title, CONCAT('Project ', p.ProjectID)) as ProjectName,
+                COALESCE(p.Abstract, p.ProblemStatement, 'No description') as Description,
+                p.ThemeID, 
+                p.Status,
+                t.ThemeName
+            FROM project p
+            LEFT JOIN theme t ON p.ThemeID = t.ThemeID
+            INNER JOIN teammember tm ON p.ProjectID = tm.ProjectID
+            WHERE tm.UserID = %s
             ORDER BY p.ProjectID DESC
             LIMIT 10
         """, (user_id,))
-        
+
+        rows = cur.fetchall()
+        print(f"📊 Found {len(rows)} projects via TeamMember for {user_id}")
+
         projects = []
-        for row in cur.fetchall():
+        for row in rows:
             projects.append({
                 'ProjectID': row[0],
-                'ProjectName': row[1] or f'Project {row[0]}',
-                'Description': row[2] or row[3] or 'No description',
-                'ThemeID': row[4],
-                'Status': row[5]
+                'ProjectName': row[1],
+                'Description': row[2],
+                'ThemeID': row[3],
+                'Status': row[4] or 'Pending',
+                'ThemeName': row[5] or 'No Theme'
             })
-        
-        print(f"✅ Loaded {len(projects)} projects for student {user_id}")
+
+        print(f"✅ Returning {len(projects)} projects for {user_id}")
         return jsonify({'projects': projects}), 200
-        
+
     except Exception as e:
-        print(f"Projects/student ERROR: {e}")
-        return jsonify({'error': str(e)}), 500
+        print(f"💥 ERROR for {user_id}: {e}")
+        return jsonify({'projects': [], 'message': 'No projects yet. Join a team!'}), 200
     finally:
         cur.close()
 
-# ✅ FIXED: Project details with submissions & evaluations
+
+# ------------------ Project details ------------------ #
 @projects_bp.route('/<int:project_id>/details', methods=['GET'])
 @jwt_required()
-@roles_required('Faculty','Student', 'Admin')
+@roles_required('Faculty', 'Student', 'Admin')
 def get_project_details_with_submissions(project_id):
     cur = mysql.connection.cursor()
     try:
         print(f"🔍 Starting project {project_id}")
-        
-        # 1. PROJECT
+
         cur.execute("""
             SELECT ProjectID, Title, Abstract, ProblemStatement, 
                    ThemeID, Status
@@ -300,7 +316,7 @@ def get_project_details_with_submissions(project_id):
             'Status': row[5]
         }
 
-        # 2. SUBMISSIONS
+        # submissions
         submissions = []
         try:
             cur.execute("""
@@ -320,7 +336,7 @@ def get_project_details_with_submissions(project_id):
         except Exception as sub_err:
             print(f"⚠️ Submissions error: {sub_err}")
 
-        # 3. EVALUATIONS - YOUR EXACT schema
+        # evaluations
         evaluations = []
         try:
             cur.execute("""
@@ -332,7 +348,7 @@ def get_project_details_with_submissions(project_id):
             """, (project_id,))
             eval_rows = cur.fetchall()
             print(f"⭐ Evaluations found: {len(eval_rows)} for project {project_id}")
-            
+
             for r in eval_rows:
                 evaluations.append({
                     'EvaluationID': r[0],
@@ -365,6 +381,7 @@ def get_project_details_with_submissions(project_id):
     finally:
         cur.close()
 
+
 @projects_bp.route('/<int:project_id>/team_members', methods=['GET'])
 @jwt_required()
 def get_project_team_members(project_id):
@@ -385,74 +402,75 @@ def get_project_team_members(project_id):
     finally:
         cur.close()
 
-# ------------------ ✅ FIXED: Team Creation with Notifications ------------------ #
+
+# ------------------ Team Creation with Notifications ------------------ #
+# ------------------ Team Creation (no notifications) ------------------ #
 @projects_bp.route('/create-team', methods=['POST'])
 @jwt_required()
 @roles_required('Student')
 def create_team_with_teammates():
     current_user_id = get_jwt_identity()
     data = request.json
-    
+
     project_name = data.get('projectName')
     theme_id = data.get('themeId')
     teammate_usns = data.get('teammateUserIds', [])  # ["1rv23is071", "1rv23is072"]
-    
+
     if not project_name or not theme_id:
         return jsonify({'error': 'Project name and theme required'}), 400
 
     cur = mysql.connection.cursor()
     try:
-        # ✅ Check if creator is already in a team
+        # creator already in team?
         cur.execute("SELECT COUNT(*) FROM TeamMember WHERE UserID = %s", (current_user_id,))
         if cur.fetchone()[0] > 0:
             return jsonify({'error': 'You are already in a team.'}), 403
-        
-        # ✅ VALIDATE teammates aren't already in teams
+
+        # validate teammates
         invalid_teammates = []
         for usn in teammate_usns:
             cur.execute("SELECT COUNT(*) FROM TeamMember WHERE UserID = %s", (usn,))
             if cur.fetchone()[0] > 0:
                 invalid_teammates.append(usn)
-        
+
         if invalid_teammates:
             return jsonify({
                 'error': 'These users are already in teams:',
                 'invalid_teammates': invalid_teammates
             }), 400
-        
-        # ✅ CREATE PROJECT
-        cur.execute("""
-            INSERT INTO Project (Title, Abstract, ThemeID, Status) 
-            VALUES (%s, %s, %s, 'Pending')
-        """, (project_name, f"Team created by {current_user_id}", theme_id))
+
+        # create project (let Status default to Unassigned)
+        cur.execute(
+            """
+            INSERT INTO Project (Title, Abstract, ThemeID)
+            VALUES (%s, %s, %s)
+            """,
+            (project_name, f"Team created by {current_user_id}", theme_id)
+        )
         project_id = cur.lastrowid
-        
-        # ✅ ADD CREATOR to TeamMember IMMEDIATELY
-        cur.execute("INSERT INTO TeamMember (ProjectID, UserID) VALUES (%s, %s)", (project_id, current_user_id))
-        
-        # ✅ CREATE TeamInvitations & SEND NOTIFICATIONS
+
+        # add creator to team
+        cur.execute(
+            "INSERT INTO TeamMember (ProjectID, UserID) VALUES (%s, %s)",
+            (project_id, current_user_id)
+        )
+
+        # create invitations
         for teammate_usn in teammate_usns:
-            # Create invitation
             cur.execute("""
-                INSERT INTO TeamInvitations (ProjectID, InvitedUserID, InviterUserID, Status, CreatedAt) 
+                INSERT INTO TeamInvitations
+                    (ProjectID, InvitedUserID, InviterUserID, Status, CreatedAt)
                 VALUES (%s, %s, %s, 'Pending', NOW())
             """, (project_id, teammate_usn, current_user_id))
-            
-            # ✅ SEND NOTIFICATION using FIXED function
-            send_direct_notification(teammate_usn, 
-                f"👥 {current_user_id} invited you to join '{project_name}' team!", 
-                'team_invite',
-                {'projectId': project_id, 'inviterId': current_user_id, 'projectName': project_name}
-            )
-        
+
         mysql.connection.commit()
         print(f"✅ Team created! Project {project_id}, Invited: {len(teammate_usns)} teammates")
-        
+
         return jsonify({
-            'message': f'Team created! {len(teammate_usns)} teammates notified 🔔',
+            'message': f'Team created! {len(teammate_usns)} teammates invited',
             'ProjectID': project_id
         }), 201
-        
+
     except Exception as e:
         mysql.connection.rollback()
         print(f"❌ Team creation error: {e}")
@@ -460,7 +478,7 @@ def create_team_with_teammates():
     finally:
         cur.close()
 
-# ------------------ ADMIN Routes (unchanged) ------------------ #
+# ------------------ Admin helpers ------------------ #
 @projects_bp.route('/admin/all_with_aggregates', methods=['GET'])
 @jwt_required()
 def get_all_projects_with_aggregates():
@@ -469,10 +487,10 @@ def get_all_projects_with_aggregates():
     try:
         cur.execute("SELECT Role FROM user WHERE UserID = %s", (current_user_id,))
         user_role = cur.fetchone()
-        
+
         if not user_role or user_role[0] != 'Admin':
             return jsonify({'error': 'Admin access required'}), 403
-        
+
         cur.execute("""
             SELECT 
                 p.ProjectID, p.Title, p.Status, COALESCE(t.ThemeName, 'Unassigned') as ThemeName,
@@ -494,7 +512,7 @@ def get_all_projects_with_aggregates():
             ORDER BY p.ProjectID
         """)
         rows = cur.fetchall()
-        
+
         projects = []
         for row in rows:
             projects.append({
@@ -513,12 +531,13 @@ def get_all_projects_with_aggregates():
                 'phase3_avg': float(row[12]) if row[12] else None,
                 'team_size': row[13] or 0
             })
-        
+
         return jsonify({'projects': projects}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
+
 
 @projects_bp.route('/<int:project_id>/approve', methods=['POST'])
 @jwt_required()
@@ -537,6 +556,7 @@ def approve_project(project_id):
     finally:
         cur.close()
 
+
 @projects_bp.route('/<int:project_id>/reject', methods=['POST'])
 @jwt_required()
 @roles_required('Admin')
@@ -553,6 +573,7 @@ def reject_project(project_id):
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
+
 
 @projects_bp.route('/admin/export_csv', methods=['GET'])
 @jwt_required()
@@ -593,6 +614,125 @@ def export_projects_csv():
         return response
 
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+# ------------------ Student: view own team invitations ------------------ #
+# ------------------ Team Invitations (Student) ------------------ #
+@projects_bp.route('/team_invitations/my', methods=['GET'])
+@jwt_required()
+@roles_required('Student')
+def get_my_team_invitations():
+    current_user_id = get_jwt_identity()
+    cur = mysql.connection.cursor()
+    try:
+        cur.execute("""
+            SELECT ti.ProjectID, p.Title, ti.InviterUserID, ti.Status, ti.CreatedAt
+            FROM TeamInvitations ti
+            JOIN Project p ON ti.ProjectID = p.ProjectID
+            WHERE ti.InvitedUserID = %s AND ti.Status = 'Pending'
+            ORDER BY ti.CreatedAt DESC
+        """, (current_user_id,))
+        rows = cur.fetchall()
+
+        invitations = []
+        for r in rows:
+            invitations.append({
+                'ProjectID': r[0],
+                'ProjectTitle': r[1],
+                'InviterUserID': r[2],
+                'Status': r[3],
+                'CreatedAt': r[4].strftime('%Y-%m-%d %H:%M') if r[4] else None
+            })
+        return jsonify({'invitations': invitations}), 200
+    except Exception as e:
+        print("Invites error:", e)
+        return jsonify({'invitations': [], 'error': str(e)}), 500
+    finally:
+        cur.close()
+
+    current_user_id = get_jwt_identity()
+    cur = mysql.connection.cursor()
+    try:
+        cur.execute("""
+            UPDATE TeamInvitations
+            SET Status = 'Rejected'
+            WHERE ProjectID = %s AND InvitedUserID = %s AND Status = 'Pending'
+        """, (project_id, current_user_id))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'No pending invitation for this project'}), 404
+
+        mysql.connection.commit()
+        return jsonify({'message': 'Invitation rejected'}), 200
+    except Exception as e:
+        mysql.connection.rollback()
+        print("Reject invite error:", e)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+
+
+# ------------------ Student: accept invite ------------------ #
+@projects_bp.route('/team_invitations/<int:project_id>/accept', methods=['POST'])
+@jwt_required()
+@roles_required('Student')
+def accept_team_invitation(project_id):
+    current_user_id = get_jwt_identity()
+    cur = mysql.connection.cursor()
+    try:
+        # check pending invite
+        cur.execute("""
+            SELECT Status FROM TeamInvitations
+            WHERE ProjectID = %s AND InvitedUserID = %s AND Status = 'Pending'
+        """, (project_id, current_user_id))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'No pending invitation for this project'}), 404
+
+        # add to team
+        cur.execute(
+            "INSERT INTO TeamMember (ProjectID, UserID) VALUES (%s, %s)",
+            (project_id, current_user_id)
+        )
+
+        # mark invite accepted
+        cur.execute("""
+            UPDATE TeamInvitations
+            SET Status = 'Accepted'
+            WHERE ProjectID = %s AND InvitedUserID = %s
+        """, (project_id, current_user_id))
+
+        mysql.connection.commit()
+        return jsonify({'message': 'Joined team successfully', 'ProjectID': project_id}), 200
+    except Exception as e:
+        mysql.connection.rollback()
+        print("Accept invite error:", e)
+        return jsonify({'error': str(e)}), 500
+    finally:
+        cur.close()
+
+
+# ------------------ Student: reject invite ------------------ #
+@projects_bp.route('/team_invitations/<int:project_id>/reject', methods=['POST'])
+@jwt_required()
+@roles_required('Student')
+def reject_team_invitation(project_id):
+    current_user_id = get_jwt_identity()
+    cur = mysql.connection.cursor()
+    try:
+        cur.execute("""
+            UPDATE TeamInvitations
+            SET Status = 'Rejected'
+            WHERE ProjectID = %s AND InvitedUserID = %s AND Status = 'Pending'
+        """, (project_id, current_user_id))
+        if cur.rowcount == 0:
+            return jsonify({'error': 'No pending invitation for this project'}), 404
+
+        mysql.connection.commit()
+        return jsonify({'message': 'Invitation rejected'}), 200
+    except Exception as e:
+        mysql.connection.rollback()
+        print("Reject invite error:", e)
         return jsonify({'error': str(e)}), 500
     finally:
         cur.close()
